@@ -9,6 +9,48 @@ inglés y español en caliente.
 > entrenamiento son **sintéticos por defecto**: sirven para demostrar el método, no para afirmar
 > una tasa de detección real.
 
+## Cómo iniciar la app
+
+```bash
+cd trees
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Se abre en `http://localhost:8501`. Para detenerla, `Ctrl+C` en la terminal. Las pruebas se
+ejecutan con `python -m pytest`.
+
+## Uso
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py            # abre http://localhost:8501
+python -m pytest                # 58 pruebas
+```
+
+En la aplicación:
+
+1. **Barra lateral** — idioma (English / Español), origen de los datos, criterio de impureza,
+   profundidad máxima, muestras mínimas por hoja y umbral de riesgo. El umbral se aplica al
+   instante; los demás cambios requieren **Reentrenar modelo**.
+2. **Pestaña Detección** — crea procesos con cualquier perfil, selecciónalos en el árbol y mira el
+   veredicto, las razones y el laboratorio de evasión.
+3. **Pestaña Modelo** — el árbol de decisión dibujado, con el camino del proceso seleccionado
+   resaltado, y la importancia de cada característica.
+4. **Pestaña Incidente** — la cola de triaje ordenada por riesgo.
+
+Para entrenar con datos propios, activa **Subir CSV** en la barra lateral. Una fila por proceso,
+con las cinco columnas de arriba más `label` (0 = benigno, 1 = ransomware), y ambas clases
+presentes:
+
+```csv
+files_per_sec,entropy,rename_ratio,shadow_delete,dirs_touched,label
+80.5,7.9,0.91,1,92,1
+0.7,5.1,0.00,0,3,0
+```
+
 ## El caso de estudio
 
 Un antivirus por firmas no reconoce una familia de ransomware que nunca ha visto. El
@@ -43,37 +85,6 @@ Los perfiles sintéticos incluyen dos benignos incómodos a propósito: un **age
 seguridad** (escribe rápido en muchos directorios) y un **compresor de archivos** (produce alta
 entropía y renombra lo que reemplaza). Existen para que ninguna característica por sí sola separe
 las clases y el árbol tenga que combinarlas.
-
-## Cómo se inicia
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py            # abre http://localhost:8501
-python -m pytest                # 58 pruebas
-```
-
-En la aplicación:
-
-1. **Barra lateral** — idioma (English / Español), origen de los datos, criterio de impureza,
-   profundidad máxima, muestras mínimas por hoja y umbral de riesgo. El umbral se aplica al
-   instante; los demás cambios requieren **Reentrenar modelo**.
-2. **Pestaña Detección** — crea procesos con cualquier perfil, selecciónalos en el árbol y mira el
-   veredicto, las razones y el laboratorio de evasión.
-3. **Pestaña Modelo** — el árbol de decisión dibujado, con el camino del proceso seleccionado
-   resaltado, y la importancia de cada característica.
-4. **Pestaña Incidente** — la cola de triaje ordenada por riesgo.
-
-Para entrenar con datos propios, activa **Subir CSV** en la barra lateral. Una fila por proceso,
-con las cinco columnas de arriba más `label` (0 = benigno, 1 = ransomware), y ambas clases
-presentes:
-
-```csv
-files_per_sec,entropy,rename_ratio,shadow_delete,dirs_touched,label
-80.5,7.9,0.91,1,92,1
-0.7,5.1,0.00,0,3,0
-```
 
 ---
 
