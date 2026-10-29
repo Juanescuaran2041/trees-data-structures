@@ -15,8 +15,7 @@ def render(session: LabSession, translate: Translator) -> None:
     )
     for feature, share in ranked:
         st.markdown(
-            f'<div class="lab-rule" style="border:none">'
-            f"{translate.feature(feature)} <span>{percentage(share, decimals=1)}</span></div>"
-            f"{meter(share)}",
+            f'<div class="lab-rule" style="border:none">{translate.feature(feature)}'
+            f"<span>{percentage(share, decimals=1)}</span></div>{meter(share)}",
             unsafe_allow_html=True,
         )

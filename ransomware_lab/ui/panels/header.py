@@ -12,7 +12,9 @@ CROSS_VALIDATION_FOLDS = 5
 def render(session: LabSession, translate: Translator) -> None:
     st.title(translate("app.title"), anchor=False)
     st.caption(translate("app.tagline"))
-    st.warning(translate("app.disclaimer"), icon="⚠️")
+    st.markdown(
+        f'<div class="lab-note">⚠️ {translate("app.disclaimer")}</div>', unsafe_allow_html=True
+    )
     _render_metrics(session, translate)
 
 
@@ -25,7 +27,8 @@ def _render_metrics(session: LabSession, translate: Translator) -> None:
         ("metrics.worst_recall", report.worst_recall),
     )
     for column, (key, value) in zip(st.columns(len(readings)), readings):
-        column.metric(translate(key), percentage(value, decimals=1))
+        with column, st.container(border=True):
+            st.metric(translate(key), percentage(value, decimals=1))
     st.caption(
         translate(
             "metrics.caption",

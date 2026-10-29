@@ -8,7 +8,7 @@ from ransomware_lab.process_tree import MonitoredProcess
 from ransomware_lab.profiles import PROFILE_CATALOG
 from ransomware_lab.session import LabSession
 from ransomware_lab.telemetry import ProcessClass
-from ransomware_lab.ui.formatting import badge, percentage, rule_sentence
+from ransomware_lab.ui.formatting import badge, caption, meter, percentage, rule_sentence
 
 
 def render(session: LabSession, translate: Translator) -> None:
@@ -16,14 +16,18 @@ def render(session: LabSession, translate: Translator) -> None:
     assessment = session.assess(process.pid)
     st.subheader(translate("assessment.title"), anchor=False)
 
-    verdict_column, risk_column = st.columns(2)
+    verdict_column, risk_column = st.columns([3, 2], vertical_alignment="center")
     verdict_column.markdown(
         badge(translate(f"verdict.{assessment.verdict.value}"), assessment.is_malicious),
         unsafe_allow_html=True,
     )
     risk_column.markdown(
-        f'<div class="lab-risk">{percentage(assessment.risk)}</div>'
-        f'<small>{translate("assessment.risk")}</small>',
+        caption(translate("assessment.risk"))
+        + f'<div class="lab-risk">{percentage(assessment.risk)}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        meter(assessment.risk, "malicious" if assessment.is_malicious else "benign"),
         unsafe_allow_html=True,
     )
 
@@ -45,10 +49,7 @@ def _render_truth_banner(
 
 
 def _render_reasons(assessment: ThreatAssessment, translate: Translator) -> None:
-    st.markdown(f"**{translate('assessment.reasons')}**")
+    st.markdown(caption(translate("assessment.reasons")), unsafe_allow_html=True)
     for outcome in assessment.triggered_rules:
-        st.markdown(
-            f'<div class="lab-rule">{rule_sentence(outcome, translate)}</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(rule_sentence(outcome, translate), unsafe_allow_html=True)
     st.caption(translate("assessment.leaf_support", samples=assessment.leaf_sample_count))

@@ -16,16 +16,21 @@ def process_caption(process: MonitoredProcess) -> str:
 def rule_sentence(outcome: RuleOutcome, translate: Translator) -> str:
     comparison = "&le;" if outcome.satisfied else "&gt;"
     return (
-        f"{translate.feature(outcome.rule.feature)} "
-        f"<span>{outcome.observed:.2f} {comparison} {outcome.rule.threshold:.2f}</span>"
+        f'<div class="lab-rule">{translate.feature(outcome.rule.feature)}'
+        f"<span>{outcome.observed:.2f} {comparison} {outcome.rule.threshold:.2f}</span></div>"
     )
 
 
-def meter(share: float) -> str:
+def meter(share: float, tone: str = "") -> str:
     width = max(0.0, min(share, 1.0)) * 100
-    return f'<div class="lab-meter"><div style="width:{width:.1f}%"></div></div>'
+    modifier = f" lab-meter--{tone}" if tone else ""
+    return f'<div class="lab-meter{modifier}"><div style="width:{width:.1f}%"></div></div>'
 
 
 def badge(text: str, malicious: bool) -> str:
     modifier = "malicious" if malicious else "benign"
     return f'<span class="lab-badge lab-badge--{modifier}">{text}</span>'
+
+
+def caption(text: str) -> str:
+    return f'<div class="lab-caption">{text}</div>'
