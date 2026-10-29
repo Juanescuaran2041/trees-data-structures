@@ -5,6 +5,7 @@ from random import Random
 
 from ransomware_lab.decision_tree import GrowthLimits, ImpurityCriterion
 from ransomware_lab.detector import DEFAULT_RISK_THRESHOLD, RansomwareDetector, ThreatAssessment
+from ransomware_lab.evaluation import CrossValidationReport, StratifiedFoldSplitter
 from ransomware_lab.process_tree import MonitoredProcess, ProcessTree
 from ransomware_lab.profiles import OFFICE_WORKLOAD, PROFILE_CATALOG, BehaviorProfile
 from ransomware_lab.sources import SyntheticTelemetrySource, TelemetrySource
@@ -118,6 +119,9 @@ class LabSession:
         process = self._process_tree.require(pid)
         process.observe(process.behavior.with_reading(feature, value))
         return process
+
+    def cross_validation_report(self, folds: int = 5) -> CrossValidationReport:
+        return self._detector.cross_validate(self._dataset, StratifiedFoldSplitter(folds))
 
     def assess(self, pid: int) -> ThreatAssessment:
         return self._detector.assess(self._process_tree.require(pid).behavior)
