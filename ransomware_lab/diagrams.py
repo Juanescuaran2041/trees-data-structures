@@ -47,7 +47,9 @@ class _DotTreeRenderer(TreeVisitor[str]):
             "digraph decision_tree {",
             "  rankdir=TB;",
             '  bgcolor="transparent";',
-            '  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=10];',
+            '  size="13,7"; ranksep=0.55; nodesep=0.28;',
+            '  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=10'
+            ' margin="0.18,0.10"];',
             f'  edge [color="{PALETTE["edge"]}" fontname="Helvetica" fontsize=9];',
         ]
         tree.root.accept(self)
@@ -112,7 +114,10 @@ def process_tree_dot(
         "digraph process_tree {",
         "  rankdir=LR;",
         '  bgcolor="transparent";',
-        '  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=10];',
+        # Capped so a two-node lineage is not blown up to the width of the column.
+        '  size="7,4.5"; ranksep=0.45; nodesep=0.22;',
+        '  node [shape=box style="rounded,filled" fontname="Helvetica" fontsize=10'
+        ' margin="0.16,0.09"];',
         f'  edge [color="{PALETTE["edge"]}"];',
     ]
     for process in process_tree:
