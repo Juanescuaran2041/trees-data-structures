@@ -20,15 +20,11 @@ streamlit run app.py
 Se abre en `http://localhost:8501`. Para detenerla, `Ctrl+C` en la terminal. Las pruebas se
 ejecutan con `python -m pytest`.
 
-## Uso
+Si prefieres aislar las dependencias, crea antes un entorno virtual con
+`python -m venv .venv` y actívalo (`.venv\Scripts\activate` en Windows,
+`source .venv/bin/activate` en Linux o macOS).
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py            # abre http://localhost:8501
-python -m pytest                # 58 pruebas
-```
+## Uso
 
 En la aplicación:
 
