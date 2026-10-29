@@ -1,295 +1,73 @@
-# Ransomware Behavior Lab
+# Laboratorio de comportamiento de ransomware
 
-A defensive, explainable ransomware detector built around three hand-written data structures: a
-**binary decision tree** (CART, grown from the data), an **n-ary process tree** (the parent/child
-chain of a compromised machine) and a **binary max-heap** (the analyst triage queue). The frontend
-is a Streamlit application that switches between English and Spanish at runtime.
+Detector **defensivo** y explicable de ransomware construido sobre tres estructuras de datos
+escritas a mano: un **árbol de decisión binario** (CART), un **árbol n-ario de procesos** y un
+**montículo máximo** (cola de triaje). La interfaz es una aplicación Streamlit que cambia entre
+inglés y español en caliente.
 
-> This project detects behavior; it does not produce it. It contains no malware and no evasion
-> payloads. Training data is **synthetic by default**: the numbers below demonstrate the method, not
-> field accuracy. Section [Using real telemetry](#using-real-telemetry) explains what it takes to
-> make a claim about real detection.
+> El proyecto detecta comportamiento; no lo produce. No contiene malware. Los datos de
+> entrenamiento son **sintéticos por defecto**: sirven para demostrar el método, no para afirmar
+> una tasa de detección real.
+
+## El caso de estudio
+
+Un antivirus por firmas no reconoce una familia de ransomware que nunca ha visto. El
+comportamiento, en cambio, se repite: cifrar rápido, escribir contenido de alta entropía, renombrar
+en masa, borrar las copias de seguridad y recorrer muchos directorios. El caso de estudio consiste
+en detectar ransomware a partir de ese comportamiento, con cinco características numéricas por
+proceso:
+
+| Columna | Significado | Rango |
+|---|---|---|
+| `files_per_sec` | Archivos escritos por segundo | 0–400 |
+| `entropy` | Entropía de Shannon del contenido escrito, en bits por byte | 0–8 |
+| `rename_ratio` | Proporción de escrituras seguidas de un renombrado | 0–1 |
+| `shadow_delete` | Se observó borrado de copias de seguridad | 0 o 1 |
+| `dirs_touched` | Directorios distintos en los que escribió | 0–400 |
+
+El laboratorio hace cinco cosas con ellas:
+
+1. **Entrena un árbol de decisión** a partir de observaciones etiquetadas.
+2. **Clasifica un proceso y se explica**: cada veredicto muestra las reglas exactas que se
+   evaluaron, la lectura observada en cada una y cuántas muestras de entrenamiento respaldan la
+   hoja a la que llegó.
+3. **Reconstruye la cadena del ataque**: un proceso detectado marca a sus ancestros como
+   sospechosos, porque el padre que lanzó el cifrador es parte del incidente.
+4. **Prioriza el incidente**: los procesos detectados entran en un montículo máximo, así el
+   analista siempre ve primero el de mayor riesgo.
+5. **Muestra dónde se rompe el modelo**: el laboratorio de evasión permite bajar la velocidad o la
+   entropía de un cifrador y ver el veredicto cambiar a benigno. Un falso negativo es un equipo
+   cifrado, así que este es el panel más honesto de la aplicación.
+
+Los perfiles sintéticos incluyen dos benignos incómodos a propósito: un **agente de copias de
+seguridad** (escribe rápido en muchos directorios) y un **compresor de archivos** (produce alta
+entropía y renombra lo que reemplaza). Existen para que ninguna característica por sí sola separe
+las clases y el árbol tenga que combinarlas.
+
+## Cómo se inicia
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py
-python -m pytest                # 58 tests
+streamlit run app.py            # abre http://localhost:8501
+python -m pytest                # 58 pruebas
 ```
 
-## What the lab does
+En la aplicación:
 
-1. **Grows a decision tree** from labeled behavior observations (5 numeric features per process).
-2. **Classifies a process and explains itself**: every verdict carries the exact rules that were
-   evaluated, the observed reading for each one, and the training support of the leaf it landed on.
-3. **Reconstructs the attack chain**: a detected process marks its ancestors as suspects, because
-   the parent that launched a locker is part of the incident.
-4. **Ranks the incident**: detected processes are pushed into a max-heap so the analyst always sees
-   the highest-risk process first.
-5. **Shows where the model breaks**: the evasion lab lets you slow a locker down, lower its entropy
-   or stop deleting shadow copies, and watch the verdict flip to benign. A false negative is an
-   encrypted machine, so this is the most honest panel in the app.
+1. **Barra lateral** — idioma (English / Español), origen de los datos, criterio de impureza,
+   profundidad máxima, muestras mínimas por hoja y umbral de riesgo. El umbral se aplica al
+   instante; los demás cambios requieren **Reentrenar modelo**.
+2. **Pestaña Detección** — crea procesos con cualquier perfil, selecciónalos en el árbol y mira el
+   veredicto, las razones y el laboratorio de evasión.
+3. **Pestaña Modelo** — el árbol de decisión dibujado, con el camino del proceso seleccionado
+   resaltado, y la importancia de cada característica.
+4. **Pestaña Incidente** — la cola de triaje ordenada por riesgo.
 
----
-
-# Data structures
-
-## 1. Binary decision tree (CART) — `ransomware_lab/decision_tree.py`
-
-### Representation
-
-The tree is a **recursive object graph**, not an array: each node owns its subtrees, so a node is a
-valid tree on its own and the structure needs no index arithmetic.
-
-```
-ClassificationNode (abstract)
-├── BehaviorSplit   → rule + on_match + on_violation   (internal node, always 2 children)
-└── VerdictLeaf     → class distribution               (terminal node)
-```
-
-Both node types implement the same four operations — `resolve`, `accept`, `walk`, `height` — so
-every traversal is polymorphic and there is not a single `isinstance` check in the hot path. A node
-stores only what it learned during training (`sample_count`, `ransomware_ratio`), never a reference
-back to the training rows, which keeps a trained tree small and independent of the dataset.
-
-`DecisionRule` is an immutable `(feature, threshold)` pair with the comparison built in
-(`reading <= threshold` goes left). Keeping the comparison inside the rule is what lets the UI
-print a human-readable reason without re-deriving the direction of the test.
-
-### How it is built
-
-`CartTreeBuilder._grow` is the classic recursive CART procedure:
-
-1. Stop and emit a `VerdictLeaf` if the node is pure, too deep or too small (`GrowthLimits`).
-2. Otherwise find the split that maximizes the impurity decrease
-   `ΔI = I(parent) − (n_left/n)·I(left) − (n_right/n)·I(right)`.
-3. Partition the observations once with the winning rule and recurse on both halves.
-
-The split search is the part worth reading. The naive version tests every candidate threshold by
-re-partitioning the dataset, which costs `O(m · n²)` per node and makes the UI unusable. Instead,
-`_sweep` sorts the observations **once per feature** and walks them in order, maintaining running
-counts of the left side:
-
-```
-sorted by feature →  o₁  o₂  o₃  o₄  o₅  o₆ ...
-                         ↑ candidate threshold = midpoint(o₂, o₃)
-left  = (size, malicious)   updated in O(1) per step
-right = (total − size, malicious_total − malicious)
-```
-
-Because Gini and entropy depend only on `(size, malicious)`, each candidate is scored in `O(1)` and
-the whole node costs `O(m · n log n)`, dominated by the sort. Thresholds are placed at the midpoint
-between consecutive distinct values, and candidates that would leave a leaf below
-`min_samples_leaf` or gain less than `min_impurity_decrease` are discarded during the sweep.
-
-| Operation | Cost | Where |
-|---|---|---|
-| Train | `O(m · n log n)` per node | `CartTreeBuilder._grow` |
-| Classify one process | `O(h)`, h = height | `BehaviorSplit.resolve` |
-| Trace the explanation | `O(h)` | `BehaviorDecisionTree.trace` |
-| Height / leaf count / walk | `O(k)`, k = nodes | `ClassificationNode.walk` |
-| Feature importance | `O(k)` | `_ImpurityImportance` (Visitor) |
-
-With the default profiles the tree comes out at **height 5, 9 leaves, 17 nodes** over 650
-observations — small enough to read on screen, which is the entire point of choosing a tree over an
-ensemble here.
-
-### Explainability
-
-`trace` returns a `DecisionPath` holding the ordered `RuleOutcome`s, the leaf that was reached and
-the node objects that were visited. The UI uses the outcomes for the reason list and the visited
-nodes to highlight the path inside the rendered diagram. The path carries **structured data, not
-preformatted sentences**, which is what makes the explanation translatable.
-
-The impurity criterion is a Strategy (`GiniImpurity`, `ShannonEntropyImpurity`) exposing
-`score(total, malicious)`. That signature — counts instead of a dataset — is what allowed the
-sweep optimization without special-casing either criterion.
-
-## 2. N-ary process tree — `ransomware_lab/process_tree.py`
-
-### Representation
-
-A `MonitoredProcess` is a Composite node holding a parent pointer and an ordered list of children,
-so the structure is an arbitrary-arity tree that mirrors how an operating system reports lineage:
-
-```
-System (4)
-├── winword.exe (1004)
-│   └── updater.exe (1006)        ← detected: stealth locker
-└── backup-agent.exe (1005)
-```
-
-`ProcessTree` wraps the root and adds a **hash index** (`dict[int, MonitoredProcess]`) so the UI can
-resolve a pid in `O(1)` instead of searching the tree on every rerun. Index and structure are
-updated in the same method, which is why `attach` is the only public way to add a process.
-
-### Traversals
-
-Three traversals, each written for the question it answers:
-
-- `breadth_first` — level by level, with a `collections.deque` as the FIFO queue; `popleft` is
-  `O(1)`, where a list would pay `O(n)` per shift. This is the default iteration order of the tree
-  because it is also the order the UI lists processes in.
-- `depth_first` — iterative with an explicit stack (children pushed reversed to preserve left-to-
-  right order). Iterative rather than recursive so a deep lineage cannot blow the Python stack.
-- `ancestors` — walks parent pointers upward in `O(d)`; this is what turns one detection into the
-  suspect chain shown in the diagram.
-
-### Invariants
-
-A tree that silently accepts a cycle stops being a tree, so the mutators validate first and raise
-`ProcessLineageError`: duplicate pid, unknown parent, reparenting a process that already has one,
-and attaching an ancestor beneath its own descendant (the cycle case, checked against the ancestor
-walk). Each rule has a test in `tests/test_process_tree.py`.
-
-| Operation | Cost |
-|---|---|
-| `attach` / `find` / `require` | `O(1)` amortized (+ `O(d)` cycle check on attach) |
-| `breadth_first` / `depth_first` | `O(n)` |
-| `ancestors` / `lineage_of` | `O(d)` |
-| `height` | `O(n)` |
-
-## 3. Binary max-heap priority queue — `ransomware_lab/triage.py`
-
-### Representation
-
-`ThreatTriageQueue` is a **complete binary tree flattened into a Python list** — written out with
-explicit index arithmetic rather than delegating to `heapq`, because the heap is the subject here:
-
-```
-index:    0      1      2      3      4      5
-        0.98   0.91   0.74   0.55   0.60   0.41
-parent(i) = (i−1)//2      children(i) = 2i+1, 2i+2
-```
-
-The heap property is `parent.priority >= child.priority` for every node, so `_tickets[0]` is always
-the highest-risk alert. `_sift_up` restores it after an append and `_sift_down` after the root is
-replaced by the last element — the standard pair of `O(log n)` repairs.
-
-### Ordering
-
-A heap is only as good as its comparison. `TriageTicket.priority` returns `(risk, -arrival)`:
-risk decides, and on a tie the ticket that arrived first wins, so equal-risk alerts keep FIFO order
-instead of whatever order the array happens to be in. `arrival` is excluded from equality
-(`compare=False` on the field) so two tickets describing the same alert still compare equal.
-
-`holds_heap_invariant()` checks the property across the whole array; the test suite calls it after
-every push and pop of 400 randomized tickets, which is how the sift logic is verified rather than
-assumed.
-
-| Operation | Cost |
-|---|---|
-| `admit` (push) | `O(log n)` |
-| `pop` | `O(log n)` |
-| `peek` | `O(1)` |
-| `most_critical(k)` | `O(n + k log n)`, non-destructive (works on a copy) |
-| `drain` | `O(n log n)`, yields risk in non-increasing order |
-
-## 4. Supporting structures
-
-| Structure | Where | Why it is the right one |
-|---|---|---|
-| Immutable tuple vector | `BehaviorVector` | Fixed-width feature vector with `O(1)` access by feature; `with_reading` returns a new vector, so an observation can never be mutated behind the detector's back |
-| Read-only sequence | `TelemetryDataset` | Wraps a tuple of observations and answers `class_counts`, `malicious_count`, `is_pure`, `subset` without copying rows per query |
-| Hash index | `ProcessTree._by_pid` | `O(1)` pid lookup for a UI that resolves pids on every rerun |
-| FIFO deque | `MonitoredProcess.breadth_first` | `O(1)` dequeue for level-order traversal |
-| Stratified fold buckets | `StratifiedFoldSplitter` | Round-robin assignment of per-class index lists, so every fold keeps the original class ratio |
-
----
-
-# Object-oriented design
-
-| Concept | Where | What it buys |
-|---|---|---|
-| Inheritance + polymorphism | `ClassificationNode` → `BehaviorSplit`, `VerdictLeaf` | Traversal and classification without type checks |
-| Composite | `MonitoredProcess` | A process and a subtree expose the same interface |
-| Strategy | `ImpurityCriterion`, `BehaviorProfile`, `FeatureDistribution`, `TelemetrySource` | Gini vs entropy, synthetic vs CSV, Gaussian vs Bernoulli — all swappable without touching callers |
-| Visitor | `TreeVisitor` → `_ImpurityImportance`, `_DotTreeRenderer` | New tree analyses and renderings without reopening the node classes |
-| Facade | `RansomwareDetector` | Domain vocabulary (`assess`, `evaluate`, `feature_importance`) over a generic tree |
-| Factory method | `RansomwareDetector.trained_on`, `CsvTelemetrySource.from_bytes`, `LabSession.bootstrap` | Each object has one obvious, validated way to be created |
-| Value objects | `DecisionRule`, `RuleOutcome`, `ConfusionMatrix`, `TriageTicket`, `GrowthLimits` | `@dataclass(frozen=True, slots=True)`: no accidental mutation, cheap to pass around |
-| Encapsulation | `_`-prefixed state + read-only properties | The detector, the tree and the heap cannot be corrupted from outside |
-| Single responsibility | `diagrams.py` only emits DOT, `app.py` only renders, `session.py` only holds state | The UI contains no detection logic and the domain contains no strings |
-| Fail fast | `TelemetryFormatError`, `ProcessLineageError`, threshold range check | Bad input is rejected at the boundary with the line and column that caused it |
-
-```
-trees/
-├── app.py                        entry point: three lines, calls render_page()
-├── .streamlit/config.toml        dark theme, accent color, minimal toolbar
-├── ransomware_lab/
-│   ├── telemetry.py              BehaviorFeature, BehaviorVector, TelemetryDataset
-│   ├── profiles.py               behavior profiles and per-feature distributions
-│   ├── sources.py                SyntheticTelemetrySource, CsvTelemetrySource
-│   ├── decision_tree.py          CART: nodes, criteria, builder, explanation path
-│   ├── process_tree.py           MonitoredProcess, ProcessTree
-│   ├── triage.py                 ThreatTriageQueue (binary max-heap)
-│   ├── evaluation.py             ConfusionMatrix, StratifiedFoldSplitter, reports
-│   ├── detector.py               RansomwareDetector facade, ThreatAssessment
-│   ├── session.py                LabSession application state
-│   ├── diagrams.py               Graphviz DOT for both trees
-│   ├── i18n.py                   Translator, English/Spanish phrase tables
-│   └── ui/
-│       ├── page.py               composition: sidebar, header, three tabs
-│       ├── theme.py              page config and stylesheet
-│       ├── state.py              session_state access (lab, language, reset)
-│       ├── sidebar.py            data source, model controls, risk threshold
-│       ├── formatting.py         shared display helpers (badges, meters, rules)
-│       └── panels/               one module per panel: header · processes ·
-│                                 assessment · evasion · decision_tree ·
-│                                 triage · importance
-└── tests/                        58 tests, including headless Streamlit runs
-```
-
-## Frontend structure
-
-`app.py` only calls `render_page()`. Everything else lives in `ransomware_lab/ui`, one module per
-panel, each exposing a single `render(session, translate)` function: a panel knows how to draw
-itself and nothing else. `page.py` is the only file that decides layout — sidebar, header, and
-three tabs (**Detection**, **Model**, **Incident**) that keep the page from becoming an endless
-scroll. `state.py` is the only file that touches `st.session_state`, so widget state and the lab
-object cannot drift apart, and resetting the lab clears stale widget keys along with it.
-
-No panel builds domain objects: the metrics panel asks `session.cross_validation_report(folds)`
-rather than assembling a splitter itself. The UI reads the session, renders it, and forwards widget
-changes back.
-
-# Internationalization
-
-`Translator` is an immutable object built from a language code; `translate("key", **placeholders)`
-resolves against the chosen table and falls back to English, then to the key itself, so a missing
-phrase degrades instead of crashing. Both diagrams receive a `DiagramLabels` bundle, which is why
-the rendered trees are translated too and `diagrams.py` never imports `i18n`. A test asserts that
-every language defines exactly the same key set — the cheapest way to keep a second language from
-rotting.
-
-The domain layer never produces prose. A verdict explanation travels as `RuleOutcome` values and is
-formatted by the UI, so the same detection renders as `Rename ratio = 0.91 > 0.42` in English and
-`Proporción de renombrados = 0.91 > 0.42` in Spanish.
-
-# Data
-
-## Features
-
-| Column | Meaning | Range |
-|---|---|---|
-| `files_per_sec` | Files written per second | 0–400 |
-| `entropy` | Shannon entropy of written payloads, in bits per byte | 0–8 |
-| `rename_ratio` | Share of writes followed by a rename | 0–1 |
-| `shadow_delete` | Shadow copy / backup deletion observed | 0 or 1 |
-| `dirs_touched` | Distinct directories written to | 0–400 |
-
-## Synthetic profiles
-
-Five profiles, three benign and two malicious. The two benign outliers are deliberate: a **backup
-agent** writes fast across many directories, and an **archive compressor** produces high-entropy
-output and renames the files it replaces. They exist so that no single feature separates the classes
-and the tree is forced to combine them — without them the tree collapses to a trivial depth-2 rule
-that would look perfect and teach nothing.
-
-## Your own CSV
-
-One row per process (or per process and time window):
+Para entrenar con datos propios, activa **Subir CSV** en la barra lateral. Una fila por proceso,
+con las cinco columnas de arriba más `label` (0 = benigno, 1 = ransomware), y ambas clases
+presentes:
 
 ```csv
 files_per_sec,entropy,rename_ratio,shadow_delete,dirs_touched,label
@@ -297,68 +75,215 @@ files_per_sec,entropy,rename_ratio,shadow_delete,dirs_touched,label
 0.7,5.1,0.00,0,3,0
 ```
 
-`label` is 0 for benign and 1 for ransomware, and both classes must be present. Missing columns,
-empty cells, non-numeric values and labels other than 0/1 are reported with the offending line.
+---
 
-# Measured results
+# Las estructuras de datos
 
-Default synthetic dataset (650 observations, 380 benign / 270 ransomware), Gini, max depth 5, risk
-threshold 0.5, stratified 5-fold cross-validation:
+## 1. Árbol de decisión binario (CART) — `ransomware_lab/decision_tree.py`
 
-| Metric | Value |
-|---|---|
-| Recall (mean over folds) | 98.1% |
-| Precision | 97.1% |
-| Accuracy | 98.0% |
-| Worst fold recall | 96.3% |
+Es el clasificador: decide si un proceso es ransomware y, sobre todo, explica por qué.
 
-Feature importance: `rename_ratio` 58.9%, `dirs_touched` 20.2%, `files_per_sec` 16.1%,
-`entropy` 4.9%, `shadow_delete` 0%. The last one is informative: shadow copy deletion is a strong
-signal on its own, but the features above it already separate those samples, so the tree never
-needs to ask.
+### Representación
 
-These numbers describe the synthetic generator, not the real world. Random cross-validation is also
-optimistic for this problem — see below.
+Un **grafo recursivo de objetos**, no un arreglo: cada nodo es dueño de sus subárboles, así que
+cualquier nodo es un árbol válido por sí mismo y la estructura no necesita aritmética de índices.
 
-# Using real telemetry
-
-**Level 1 — public datasets.** RanSAP and its successor RanSMAP (storage and memory access patterns
-captured under a hypervisor), ISOT (sandbox analysis) and CLEAR (labeled storage commands) contain
-real ransomware executions. None of them ships these five features: an adapter has to aggregate
-their events per process and time window and export the CSV schema above. That adapter is not
-included in this repository.
-
-**Level 2 — your own lab.** Isolated VMs with no network and restorable snapshots, Sysmon (events 1,
-11, 23), ETW or auditd for collection. Malicious behavior belongs only in that lab.
-
-**Level 3 — honest evaluation.** Split by ransomware **family** and by **time**, not at random, to
-measure generalization to unseen attacks; report precision/recall/PR-AUC rather than accuracy on
-an imbalanced problem; prioritize recall, since a false negative is an encrypted machine.
-
-# Testing
-
-```bash
-python -m pytest
+```
+ClassificationNode (abstracta)
+├── BehaviorSplit   → regla + on_match + on_violation   (nodo interno, siempre 2 hijos)
+└── VerdictLeaf     → distribución de clases            (nodo terminal)
 ```
 
-58 tests, grouped by what they protect:
+Ambos tipos implementan las mismas cuatro operaciones — `resolve`, `accept`, `walk`, `height` —, de
+modo que todo recorrido es polimórfico y no hay un solo `isinstance` en el camino caliente. Un nodo
+guarda únicamente lo que aprendió durante el entrenamiento (`sample_count`, `ransomware_ratio`),
+nunca una referencia a las filas, así un árbol entrenado es pequeño e independiente del conjunto de
+datos.
 
-- `test_decision_tree.py` — impurity edge cases, threshold placement and inclusivity, growth limits,
-  path/leaf consistency, pure and empty datasets.
-- `test_process_tree.py` — traversal orders, lineage, depth and height, and every rejected mutation.
-- `test_triage.py` — ordering, FIFO tie-breaking, and the heap invariant checked after every push
-  and pop over 400 randomized tickets.
-- `test_pipeline.py` — CSV validation messages, cross-validation, the monotonic threshold/recall
-  relationship, feature importance as a distribution, session behavior and translation parity.
-- `test_app.py` — headless `AppTest` runs: initial render, language switch, spawning a process,
-  moving the risk threshold.
+`DecisionRule` es un par inmutable `(característica, umbral)` con la comparación incorporada
+(`lectura <= umbral` va a la izquierda). Tener la comparación dentro de la regla es lo que permite
+que la interfaz imprima una razón legible sin volver a deducir la dirección de la prueba.
 
-# Limitations
+### Cómo se construye
 
-- The process tree is simulated even when the model is trained on a real CSV; only the detector
-  learns from real data.
-- A single tree is interpretable but weak against evasion. The evasion lab demonstrates exactly
-  that, and the next step is a forest over sliding time windows, keeping importances for
-  explainability.
-- Random cross-validation overstates generalization; split by family and time before claiming a
-  detection rate.
+`CartTreeBuilder._grow` es el procedimiento CART recursivo:
+
+1. Detenerse y emitir una `VerdictLeaf` si el nodo es puro, está demasiado profundo o tiene
+   demasiado pocas muestras (`GrowthLimits`).
+2. Si no, buscar la partición que maximiza la reducción de impureza
+   `ΔI = I(padre) − (n_izq/n)·I(izq) − (n_der/n)·I(der)`.
+3. Partir las observaciones una sola vez con la regla ganadora y recurrir sobre ambas mitades.
+
+La búsqueda de la partición es la parte que merece leerse. La versión ingenua prueba cada umbral
+candidato volviendo a partir el conjunto, lo que cuesta `O(m · n²)` por nodo y deja la interfaz
+inservible. En su lugar, `_sweep` ordena las observaciones **una vez por característica** y las
+recorre manteniendo contadores acumulados del lado izquierdo:
+
+```
+ordenado por característica →  o₁  o₂  o₃  o₄  o₅  o₆ ...
+                                   ↑ umbral candidato = punto medio(o₂, o₃)
+izquierda = (tamaño, maliciosos)       se actualiza en O(1) por paso
+derecha   = (total − tamaño, maliciosos_total − maliciosos)
+```
+
+Como Gini y entropía dependen solo de `(tamaño, maliciosos)`, cada candidato se evalúa en `O(1)` y
+el nodo completo cuesta `O(m · n log n)`, dominado por el ordenamiento. Los umbrales se colocan en
+el punto medio entre valores distintos consecutivos, y los candidatos que dejarían una hoja por
+debajo de `min_samples_leaf` o que ganan menos de `min_impurity_decrease` se descartan durante el
+mismo barrido.
+
+El criterio de impureza es una estrategia intercambiable (`GiniImpurity`,
+`ShannonEntropyImpurity`) que expone `score(total, maliciosos)`. Esa firma —contadores en vez de un
+conjunto de datos— es justamente lo que permitió el barrido sin casos especiales.
+
+| Operación | Costo | Dónde |
+|---|---|---|
+| Entrenar | `O(m · n log n)` por nodo | `CartTreeBuilder._grow` |
+| Clasificar un proceso | `O(h)`, h = altura | `BehaviorSplit.resolve` |
+| Trazar la explicación | `O(h)` | `BehaviorDecisionTree.trace` |
+| Altura / hojas / recorrido | `O(k)`, k = nodos | `ClassificationNode.walk` |
+| Importancia de características | `O(k)` | `_ImpurityImportance` (Visitor) |
+
+### Cómo se aplica en la interfaz
+
+`trace` devuelve un `DecisionPath` con las `RuleOutcome` en orden, la hoja alcanzada y los nodos
+visitados. La pestaña **Detección** usa las reglas para la lista de razones; la pestaña **Modelo**
+usa los nodos visitados para resaltar el camino dentro del diagrama. El camino lleva **datos
+estructurados, no frases ya formateadas**, que es lo que hace la explicación traducible.
+
+## 2. Árbol n-ario de procesos — `ransomware_lab/process_tree.py`
+
+Es la cadena del ataque: quién lanzó a quién.
+
+### Representación
+
+Un `MonitoredProcess` es un nodo Composite con un puntero al padre y una lista ordenada de hijos,
+de modo que la estructura es un árbol de aridad arbitraria que refleja cómo el sistema operativo
+reporta el linaje:
+
+```
+System (4)
+├── winword.exe (1004)
+│   └── updater.exe (1006)        ← detectado: cifrador sigiloso
+└── backup-agent.exe (1005)
+```
+
+`ProcessTree` envuelve la raíz y añade un **índice hash** (`dict[int, MonitoredProcess]`) para
+resolver un pid en `O(1)` en vez de recorrer el árbol en cada recarga de la interfaz. El índice y
+la estructura se actualizan en el mismo método, y por eso `attach` es la única forma pública de
+agregar un proceso.
+
+### Recorridos
+
+Tres recorridos, cada uno escrito para la pregunta que responde:
+
+- `breadth_first` — por niveles, con un `collections.deque` como cola FIFO; `popleft` es `O(1)`,
+  mientras que una lista pagaría `O(n)` por desplazamiento. Es el orden de iteración por defecto
+  del árbol porque también es el orden en que la interfaz lista los procesos.
+- `depth_first` — iterativo con pila explícita (los hijos se apilan invertidos para conservar el
+  orden izquierda-derecha). Iterativo y no recursivo para que un linaje profundo no desborde la
+  pila de Python.
+- `ancestors` — sube por los punteros al padre en `O(d)`; es lo que convierte una sola detección en
+  la cadena de sospechosos que se pinta en el diagrama.
+
+### Invariantes
+
+Un árbol que acepta un ciclo en silencio deja de ser un árbol, así que los métodos que mutan
+validan primero y lanzan `ProcessLineageError`: pid duplicado, padre desconocido, reasignar un
+proceso que ya tiene padre, y colgar un ancestro debajo de su propio descendiente (el caso del
+ciclo, comprobado contra el recorrido de ancestros).
+
+| Operación | Costo |
+|---|---|
+| `attach` / `find` / `require` | `O(1)` amortizado (+ `O(d)` de verificación de ciclo) |
+| `breadth_first` / `depth_first` | `O(n)` |
+| `ancestors` / `lineage_of` | `O(d)` |
+| `height` | `O(n)` |
+
+## 3. Montículo máximo binario — `ransomware_lab/triage.py`
+
+Es la cola de triaje: qué proceso atiende primero el analista.
+
+### Representación
+
+`ThreatTriageQueue` es un **árbol binario completo aplanado en una lista** de Python, escrito con
+aritmética de índices explícita en vez de delegar en `heapq`, porque aquí el montículo es el tema:
+
+```
+índice:   0      1      2      3      4      5
+        0.98   0.91   0.74   0.55   0.60   0.41
+padre(i) = (i−1)//2      hijos(i) = 2i+1, 2i+2
+```
+
+La propiedad de montículo es `padre.prioridad >= hijo.prioridad` para todo nodo, así que
+`_tickets[0]` siempre es la alerta de mayor riesgo. `_sift_up` la restaura tras un `append` y
+`_sift_down` después de que la raíz es reemplazada por el último elemento: el par estándar de
+reparaciones en `O(log n)`.
+
+### El orden
+
+Un montículo vale lo que valga su comparación. `TriageTicket.priority` devuelve
+`(riesgo, -llegada)`: decide el riesgo y, en caso de empate, gana el ticket que llegó primero, de
+modo que las alertas con el mismo riesgo conservan el orden FIFO en vez de uno arbitrario. El campo
+`arrival` queda fuera de la igualdad (`compare=False`), así dos tickets de la misma alerta siguen
+siendo iguales.
+
+`holds_heap_invariant()` comprueba la propiedad en todo el arreglo; las pruebas la llaman después
+de cada inserción y extracción de 400 tickets aleatorios, que es como se verifica la lógica de
+flotación y hundimiento en vez de darla por buena.
+
+| Operación | Costo |
+|---|---|
+| `admit` (insertar) | `O(log n)` |
+| `pop` | `O(log n)` |
+| `peek` | `O(1)` |
+| `most_critical(k)` | `O(n + k log n)`, no destructivo (trabaja sobre una copia) |
+| `drain` | `O(n log n)`, entrega el riesgo en orden no creciente |
+
+## 4. Estructuras de apoyo
+
+| Estructura | Dónde | Por qué es la adecuada |
+|---|---|---|
+| Vector inmutable de tuplas | `BehaviorVector` | Vector de características de ancho fijo con acceso `O(1)`; `with_reading` devuelve un vector nuevo, así una observación nunca se muta a espaldas del detector |
+| Secuencia de solo lectura | `TelemetryDataset` | Envuelve una tupla de observaciones y responde `class_counts`, `malicious_count`, `is_pure` y `subset` sin copiar filas en cada consulta |
+| Índice hash | `ProcessTree._by_pid` | Búsqueda de pid en `O(1)` para una interfaz que resuelve pids en cada recarga |
+| Cola FIFO (`deque`) | `MonitoredProcess.breadth_first` | Desencolado en `O(1)` para el recorrido por niveles |
+| Pila explícita | `MonitoredProcess.depth_first` | Recorrido en profundidad sin recursión |
+| Cubetas estratificadas | `StratifiedFoldSplitter` | Reparto round-robin de los índices por clase, así cada pliegue conserva la proporción original |
+
+---
+
+# Estructura del proyecto
+
+```
+trees/
+├── app.py                        punto de entrada: tres líneas, llama a render_page()
+├── .streamlit/config.toml        tema oscuro, color de acento
+├── ransomware_lab/
+│   ├── telemetry.py              BehaviorFeature, BehaviorVector, TelemetryDataset
+│   ├── profiles.py               perfiles de comportamiento y distribuciones por característica
+│   ├── sources.py                SyntheticTelemetrySource, CsvTelemetrySource
+│   ├── decision_tree.py          CART: nodos, criterios, constructor, camino de explicación
+│   ├── process_tree.py           MonitoredProcess, ProcessTree
+│   ├── triage.py                 ThreatTriageQueue (montículo máximo binario)
+│   ├── evaluation.py             ConfusionMatrix, StratifiedFoldSplitter, informes
+│   ├── detector.py               fachada RansomwareDetector, ThreatAssessment
+│   ├── session.py                LabSession, el estado de la aplicación
+│   ├── diagrams.py               DOT de Graphviz para ambos árboles
+│   ├── i18n.py                   Translator, tablas de frases en inglés y español
+│   └── ui/
+│       ├── page.py               composición: barra lateral, encabezado y tres pestañas
+│       ├── theme.py              configuración de página y hoja de estilos
+│       ├── state.py              acceso a st.session_state (laboratorio, idioma, reinicio)
+│       ├── sidebar.py            origen de datos, controles del modelo, umbral de riesgo
+│       ├── formatting.py         ayudantes de presentación (insignias, medidores, reglas)
+│       └── panels/               un módulo por panel: header · processes · assessment ·
+│                                 evasion · decision_tree · triage · importance
+└── tests/                        58 pruebas, incluidas ejecuciones de la app sin navegador
+```
+
+Cada panel expone una sola función `render(session, translate)`: sabe dibujarse y nada más.
+`page.py` es el único archivo que decide la disposición y `state.py` el único que toca
+`st.session_state`. Ningún panel construye objetos del dominio ni produce texto del dominio: el
+detector devuelve datos y la interfaz los formatea, que es lo que permite traducir la aplicación
+entera —diagramas incluidos— sin tocar la lógica.
