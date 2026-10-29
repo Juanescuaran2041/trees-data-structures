@@ -215,7 +215,8 @@ assumed.
 
 ```
 trees/
-├── app.py                        Streamlit UI: renders the session, forwards widget changes
+├── app.py                        entry point: three lines, calls render_page()
+├── .streamlit/config.toml        dark theme, accent color, minimal toolbar
 ├── ransomware_lab/
 │   ├── telemetry.py              BehaviorFeature, BehaviorVector, TelemetryDataset
 │   ├── profiles.py               behavior profiles and per-feature distributions
@@ -227,9 +228,31 @@ trees/
 │   ├── detector.py               RansomwareDetector facade, ThreatAssessment
 │   ├── session.py                LabSession application state
 │   ├── diagrams.py               Graphviz DOT for both trees
-│   └── i18n.py                   Translator, English/Spanish phrase tables
+│   ├── i18n.py                   Translator, English/Spanish phrase tables
+│   └── ui/
+│       ├── page.py               composition: sidebar, header, three tabs
+│       ├── theme.py              page config and stylesheet
+│       ├── state.py              session_state access (lab, language, reset)
+│       ├── sidebar.py            data source, model controls, risk threshold
+│       ├── formatting.py         shared display helpers (badges, meters, rules)
+│       └── panels/               one module per panel: header · processes ·
+│                                 assessment · evasion · decision_tree ·
+│                                 triage · importance
 └── tests/                        58 tests, including headless Streamlit runs
 ```
+
+## Frontend structure
+
+`app.py` only calls `render_page()`. Everything else lives in `ransomware_lab/ui`, one module per
+panel, each exposing a single `render(session, translate)` function: a panel knows how to draw
+itself and nothing else. `page.py` is the only file that decides layout — sidebar, header, and
+three tabs (**Detection**, **Model**, **Incident**) that keep the page from becoming an endless
+scroll. `state.py` is the only file that touches `st.session_state`, so widget state and the lab
+object cannot drift apart, and resetting the lab clears stale widget keys along with it.
+
+No panel builds domain objects: the metrics panel asks `session.cross_validation_report(folds)`
+rather than assembling a splitter itself. The UI reads the session, renders it, and forwards widget
+changes back.
 
 # Internationalization
 
